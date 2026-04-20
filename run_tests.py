@@ -7,8 +7,8 @@ import time
 #config
 RESULTS_FILE = '/home/p4/tutorials/exercises/conga-replication/results.json'
 RECV_IP      = '10.0.5.5'
-IPERF_DUR    = 10
-WAIT_AFTER   = 15
+IPERF_DUR    = 15   #longer duration gives TCP time to ramp up at 10 Mbps
+WAIT_AFTER   = 20   #enough time for all flows to finish + a small drain buffer
 FANOUTS      = [2, 4]
 N_RUNS       = 5
 
