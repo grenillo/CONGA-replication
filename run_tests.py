@@ -5,14 +5,14 @@ import os
 import time
 
 #config
-RESULTS_FILE = '/home/p4/tutorials/exercises/conga-replication/results.json'
+RESULTS_FILE = '/home/p4/Desktop/conga-replication/results.json'
 RECV_IP      = '10.0.5.5'
-IPERF_DUR    = 15   #longer duration gives TCP time to ramp up at 10 Mbps
-WAIT_AFTER   = 20   #enough time for all flows to finish + a small drain buffer
+IPERF_DUR    = 15
+WAIT_AFTER   = 22   #IPERF_DUR + ramp + buffer
 FANOUTS      = [2, 4]
 N_RUNS       = 5
+BASE_PORT    = 5101
 
-#mode is set by the user before running this script
 try:
     MODE = AUTOEXP_MODE
 except NameError:
@@ -36,19 +36,25 @@ def run_one(net, n_senders, run_id):
     hrecv   = net.get('hrecv')
     senders = [net.get(f'h{i+1}') for i in range(n_senders)]
 
-    #kill any leftover iperf
-    hrecv.cmd('pkill -f iperf 2>/dev/null; sleep 0.2')
+    #hard kill all iperf everywhere, wait for ports to release
+    hrecv.cmd('pkill -9 -f iperf 2>/dev/null')
+    for h in senders:
+        h.cmd('pkill -9 -f iperf 2>/dev/null')
+        h.cmd('rm -f /tmp/iperf_{}.txt'.format(h.name))
+    time.sleep(3.0)  # give OS time to release ports and clear queues
 
-    #start server
-    hrecv.cmd('iperf -s -D')
-    time.sleep(1.0)
+    #start one server per sender on its own port
+    for i in range(n_senders):
+        port = BASE_PORT + i
+        hrecv.cmd(f'iperf -s -p {port} -D')
+    time.sleep(2.0)  # servers must be listening before clients connect
 
     #start all clients simultaneously
-    for h in senders:
-        h.cmd(f'iperf -c {RECV_IP} -t {IPERF_DUR} '
+    for i, h in enumerate(senders):
+        port = BASE_PORT + i
+        h.cmd(f'iperf -c {RECV_IP} -p {port} -t {IPERF_DUR} '
               f'> /tmp/iperf_{h.name}.txt 2>&1 &')
 
-    #wait for flows to finish
     print(f'  [run {run_id}/{N_RUNS}] waiting {WAIT_AFTER}s...', flush=True)
     time.sleep(WAIT_AFTER)
 
@@ -69,8 +75,7 @@ def run_one(net, n_senders, run_id):
     total = sum(values)
     print(f'    TOTAL: {total:.1f} Mbits/sec')
 
-    #kill server
-    hrecv.cmd('pkill -f iperf 2>/dev/null')
+    hrecv.cmd('pkill -9 -f iperf 2>/dev/null')
     time.sleep(1)
 
     return values
@@ -99,7 +104,6 @@ def print_summary():
             for r in runs:
                 per = '  '.join(f'{v:.1f}' for v in r['per_host'])
                 print(f'    run {r["run"]}: [{per}]  total={r["total"]:.1f}')
-
 
 
 print(f'\n{"="*50}')

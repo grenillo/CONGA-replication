@@ -1,7 +1,7 @@
 BUILD_DIR  = build
 PCAP_DIR   = pcaps
 LOG_DIR    = logs
-RUN_SCRIPT = ../../utils/run_exercise.py
+RUN_SCRIPT = /home/p4/tutorials/utils/run_exercise.py
 
 all: run
 

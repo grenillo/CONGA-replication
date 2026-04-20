@@ -71,8 +71,13 @@ def plot():
     x       = np.arange(len(fanouts))
     width   = 0.35
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    fig.suptitle(
+        'ECMP vs CONGA-Flow: Incast Throughput\n'
+        'BMv2/Mininet replication — Alizadeh et al., SIGCOMM 2014',
+        fontsize=11)
 
+    # ── Left panel: aggregate throughput (median ± std across runs) ───────────
     for idx, mode in enumerate(modes):
         if mode not in data:
             print(f'[!] No data for {mode}, skipping')
@@ -84,28 +89,55 @@ def plot():
             medians.append(float(np.median(totals)))
             errors.append(float(np.std(totals)) if len(totals) > 1 else 0)
 
-        ax.bar(x + (idx - 0.5) * width, medians, width,
-               yerr=errors, capsize=4,
-               label=labels[mode], color=colors[mode],
-               edgecolor='white', error_kw={'elinewidth': 1.5})
+        ax1.bar(x + (idx - 0.5) * width, medians, width,
+                yerr=errors, capsize=4,
+                label=labels[mode], color=colors[mode],
+                edgecolor='white', error_kw={'elinewidth': 1.5})
 
-    ax.set_xlabel('Fanout (number of simultaneous senders)', fontsize=11)
-    ax.set_ylabel('Aggregate throughput (Mbits/sec)',        fontsize=11)
-    ax.set_title(
-        'Incast throughput: ECMP vs CONGA-Flow\n'
-        'BMv2/Mininet replication of Figure 13 — Alizadeh et al., SIGCOMM 2014',
-        fontsize=10)
-    ax.set_xticks(x)
-    ax.set_xticklabels([f'N={n}' for n in fanouts])
-    ax.legend()
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.grid(axis='y', linestyle='--', alpha=0.4)
-    ax.set_ylim(bottom=0)
+    ax1.set_xlabel('Fanout (number of simultaneous senders)', fontsize=11)
+    ax1.set_ylabel('Aggregate throughput (Mbits/sec)', fontsize=11)
+    ax1.set_title('Aggregate Throughput\n(median ± std across runs)', fontsize=10)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([f'N={n}' for n in fanouts])
+    ax1.legend()
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    ax1.grid(axis='y', linestyle='--', alpha=0.4)
+    ax1.set_ylim(bottom=0)
+
+    # ── Right panel: per-host throughput std dev (fairness metric) ────────────
+    # Computed as average within-run std dev across all runs for each condition.
+    # Lower = more even distribution across senders within a single experiment.
+    for idx, mode in enumerate(modes):
+        if mode not in data:
+            continue
+        within_run_stds = []
+        for n in fanouts:
+            runs = data[mode].get(str(n), [])
+            if not runs:
+                within_run_stds.append(0)
+                continue
+            per_run_stds = [float(np.std(r['per_host'])) for r in runs]
+            within_run_stds.append(float(np.mean(per_run_stds)))
+
+        ax2.bar(x + (idx - 0.5) * width, within_run_stds, width,
+                label=labels[mode], color=colors[mode], edgecolor='white')
+
+    ax2.set_xlabel('Fanout (number of simultaneous senders)', fontsize=11)
+    ax2.set_ylabel('Avg within-run std dev (Mbits/sec)', fontsize=11)
+    ax2.set_title('Per-Host Throughput Fairness\n(lower = more even distribution)', fontsize=10)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([f'N={n}' for n in fanouts])
+    ax2.legend()
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    ax2.grid(axis='y', linestyle='--', alpha=0.4)
+    ax2.set_ylim(bottom=0)
+
     plt.tight_layout()
 
     outfile = 'figure13_replication.png'
-    plt.savefig(outfile, dpi=150)
+    plt.savefig(outfile, dpi=150, bbox_inches='tight')
     print(f'\n[*] Plot saved to {outfile}')
     plt.show()
 
