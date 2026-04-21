@@ -1,7 +1,7 @@
 # CONGA Replication: Distributed Congestion-Aware Load Balancing for Datacenters
 
 **Report by:** Jonny Grenillo  
-**Repository:** [github.com/grenillo/CONGA-replication](https://github.com/grenillo/CONGA-replication).  
+**Repository:** [github.com/grenillo/CONGA-replication](https://github.com/grenillo/CONGA-replication)  
 **Paper:** Alizadeh et al., "CONGA: Distributed Congestion-Aware Load Balancing for Datacenters," ACM SIGCOMM 2014, pp. 503–514.  
 **Paper URL:** https://people.csail.mit.edu/alizadeh/papers/conga-sigcomm14.pdf
 
