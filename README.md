@@ -1,7 +1,7 @@
 # CONGA Replication: Distributed Congestion-Aware Load Balancing for Datacenters
 
 **Report by:** Jonny Grenillo  
-**Repository:** [github.com/grenillo/CONGA-replication](https://github.com/grenillo/CONGA-replication)
+**Repository:** [github.com/grenillo/CONGA-replication](https://github.com/grenillo/CONGA-replication). 
 **Paper:** Alizadeh et al., "CONGA: Distributed Congestion-Aware Load Balancing for Datacenters," ACM SIGCOMM 2014, pp. 503–514.  
 **Paper URL:** https://people.csail.mit.edu/alizadeh/papers/conga-sigcomm14.pdf
 
@@ -197,20 +197,4 @@ The N=4 results show more variance than N=2 because four flows across two uplink
 - *Where the bottleneck sits determines what you can measure:* the most important experimental calibration decision was moving the rate limit from the host NICs to the switch uplinks. Only then did the load balancing mechanism have anything to act on.
 - *The trend is the result:* due to platform differences, absolute throughput numbers cannot match the paper. The relative behavior, CONGA-Flow using both uplinks while ECMP wastes one is the meaningful replication target, and it replicates clearly.
 
----
 
-## Source Files
-
-| File | Description |
-|------|-------------|
-| `conga.p4` | CONGA-Flow P4 program |
-| `ecmp.p4` | ECMP baseline P4 program |
-| `run_tests.py` | Automated incast experiment runner (includes uplink shaping setup) |
-| `save_result.py` | Result storage and plot generation (`python3 save_result.py plot`) |
-| `results.json` | Raw experimental data from both ECMP and CONGA-Flow runs |
-| `figure13_replication.png` | Results figure (aggregate throughput + per-host fairness) |
-| `s{1-4}-runtime.json` | Per-switch P4Runtime table entries for ECMP |
-| `s{1-4}-conga-runtime.json` | Per-switch P4Runtime table entries for CONGA-Flow |
-| `topology.json` | Mininet topology definition for ECMP |
-| `topology-conga.json` | Mininet topology definition for CONGA-Flow |
-| `Makefile` | Build and run targets |
