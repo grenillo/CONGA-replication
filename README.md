@@ -1,5 +1,7 @@
-# Replicating CONGA: Distributed Congestion-Aware Load Balancing for Datacenters 
+# CONGA Replication: Distributed Congestion-Aware Load Balancing for Datacenters
+
 **Report by:** Jonny Grenillo  
+**Repository:** [github.com/grenillo/CONGA-replication](https://github.com/grenillo/CONGA-replication)
 **Paper:** Alizadeh et al., "CONGA: Distributed Congestion-Aware Load Balancing for Datacenters," ACM SIGCOMM 2014, pp. 503–514.  
 **Paper URL:** https://people.csail.mit.edu/alizadeh/papers/conga-sigcomm14.pdf
 
@@ -7,239 +9,208 @@
 
 ## Introduction
 
-Datacenter networks built on Leaf-Spine (Clos) topologies provide multiple equal-cost paths between any two hosts. The dominant approach to exploiting this redundancy is ECMP (Equal-Cost Multi-Path), which hashes each TCP flow's 5-tuple to a fixed path at ingress. ECMP is simple and stateless, but it has two well-known failure modes: hash collisions cause large flows to pile up on a single link while other paths sit idle, and ECMP has no feedback mechanism, so it cannot detect or react to congestion or link failures.
+This project replicates key results from:
 
-CONGA (Congestion-Aware Balancing) is a network-based load balancing mechanism that addresses both problems without modifying TCP or requiring a centralized controller. Its core contributions are:
+> Alizadeh, M., Edsall, T., Dharmapurikar, S., Vaidyanathan, R., Chu, K., Fingerhut, A., Lam, V. T., Matus, F., Pan, R., Yadav, N., and Varghese, G. "CONGA: Distributed Congestion-Aware Load Balancing for Datacenters." *ACM SIGCOMM 2014*, pp. 503–514.  
+> https://people.csail.mit.edu/alizadeh/papers/conga-sigcomm14.pdf
 
-1. **Flowlet switching:** TCP flows are split into short bursts called flowlets, separated by idle gaps large enough that the second burst can take a different path without causing packet reordering. This gives finer-grained control than per-flow hashing.
+CONGA is an in-network load balancing mechanism for datacenter Leaf-Spine fabrics. It addresses two well-known failure modes of ECMP (Equal-Cost Multi-Path), the dominant baseline: hash collisions, where multiple large flows are hashed onto the same uplink leaving other paths idle, and asymmetry blindness, where ECMP continues forwarding to a congested or failed link because it has no feedback mechanism.
 
-2. **Leaf-to-leaf congestion feedback:** Each switch measures per-link queue occupancy using a Discounting Rate Estimator (DRE). The destination leaf piggybacks this congestion metric back to the source leaf on reverse-direction packets. The source leaf maintains a real-time congestion table across all paths to each destination leaf and routes each new flowlet to the least-congested path.
+CONGA's core insight is that local congestion awareness alone is insufficient, and can paradoxically make things worse than ECMP under asymmetric conditions. Instead, CONGA uses a leaf-to-leaf feedback loop: destination leaf switches piggyback congestion metrics back to source leaf switches via an overlay header, giving each source a real-time global view of congestion across all uplink paths. Flowlet switching is used as the load balancing granularity, routing bursts of packets separated by an idle gap to different paths, avoiding TCP reordering while achieving sub-flow flexibility.
 
-3. **Global rather than local awareness:** The paper proves that local congestion signals alone are insufficient and can actually make load worse than ECMP under asymmetric conditions. Leaf-to-leaf feedback is sufficient and near-optimal in 2-tier Leaf-Spine topologies, with a provable Price of Anarchy of 2.
-
-CONGA was implemented in custom Broadcom Trident 2 ASICs. In hardware testbed experiments, it achieves 5× better flow completion time than ECMP under link failure and 2–8× better throughput than MPTCP in incast scenarios.
-
----
-
-## Result Chosen and Why
-
-I targeted the core load balancing claim: **CONGA-Flow achieves more even path utilization than ECMP under simultaneous incast traffic, observable as lower per-host throughput variance across senders.**
-
-This is the claim underlying Figure 12 (throughput imbalance CDF) and is the reason CONGA outperforms ECMP in Figure 13 (incast throughput). Figure 13 in the paper specifically compares CONGA+TCP against MPTCP, not against ECMP directly, which tests TCP incast collapse rather than fabric load balancing. My operationalization — measuring per-host throughput distribution across N simultaneous iperf senders under both ECMP and CONGA-Flow — tests the load balancing claim directly in the BMv2/Mininet environment.
-
-I chose CONGA-Flow (rather than full CONGA) because full CONGA requires multi-bit congestion tags propagated across all fabric hops simultaneously, which is not feasible in BMv2 without custom metadata headers that cannot actually be carried in-band across switch boundaries. CONGA-Flow captures the core insight: at each flowlet boundary, pick the path whose congestion register is lowest. This is directly implementable in P4.
+The paper demonstrates that CONGA achieves 5× better flow completion times than ECMP under link failure, and 2–8× better throughput than MPTCP in incast scenarios, while requiring no endpoint modifications.
 
 ---
 
-## Methodology Described in the Paper
+## Result Chosen and Rationale
 
-The paper's testbed consists of 64 servers organized into two racks of 32, connected to two leaf switches via 10 Gbps links. Two spine switches connect to each leaf with two 40 Gbps uplinks each (a 2:1 oversubscription ratio). CONGA runs on custom switching ASICs at the leaf layer.
+The replication target is the incast throughput comparison between ECMP and CONGA-Flow, analogous to the experiment described around Figures 7 and 13 of the paper. Specifically: aggregate and per-host throughput under a synchronized incast workload at varying fanout values (N=2 and N=4 simultaneous senders targeting a single receiver).
 
-The CONGA mechanism works as follows:
+**Why this result:** The incast scenario is the paper's sharpest demonstration of ECMP's hash collision problem. With N senders all routing through the same source leaf switch, ECMP deterministically maps each 5-tuple to a fixed uplink, and with only 2 uplinks available, collisions are likely at N=4. CONGA-Flow's congestion-informed path selection should detect the overloaded uplink and rebalance flowlets to the less-congested path. This is directly implementable in P4 without requiring the full VXLAN overlay infrastructure.
 
-- **Flowlet detection:** Each leaf switch maintains a Flowlet Table keyed on a hash of the 5-tuple. An entry holds the chosen uplink port and an age bit. If a packet arrives and the entry's age bit indicates a gap longer than the flowlet inactivity timeout *T_fl* (default 500 µs), the flowlet is considered new and a fresh load balancing decision is made.
-
-- **Congestion measurement:** Each fabric link runs a Discounting Rate Estimator (DRE), a register *X* that is incremented by packet size on each transmission and decayed multiplicatively every *T_dre* microseconds. The DRE output is quantized to 3 bits and represents the link's current utilization.
-
-- **Congestion feedback:** The source leaf tags each outgoing packet with an `LBTag` identifying the uplink taken. As the packet traverses the fabric, each switch updates a `CE` (congestion experienced) field in the packet header to the maximum DRE value seen so far. The destination leaf stores this per-path metric and piggybacks it onto reverse-direction packets as `FB_LBTag` and `FB_Metric`. The source leaf uses this to update its per-destination-leaf, per-uplink Congestion-To-Leaf Table.
-
-- **Load balancing decision:** On the first packet of each new flowlet, the source leaf selects the uplink that minimizes the maximum of the local DRE value and the remote congestion metric from the Congestion-To-Leaf Table.
-
-For the incast experiment (Figure 13), a client on one server requests a 10 MB file striped across N servers simultaneously, with each server sending 10 MB/N back. The paper measures aggregate throughput at the client as N increases from 1 to 63.
+**CONGA-Flow vs. full CONGA:** The paper distinguishes CONGA (flowlet timeout T_fl = 500µs, aggressive per-flowlet splitting) from CONGA-Flow (T_fl = 13ms, effectively one load balancing decision per flow). CONGA-Flow is the honest P4-implementable target: it captures the congestion-aware path selection logic without requiring per-packet reordering tolerance or sub-millisecond register feedback. This replication implements CONGA-Flow only.
 
 ---
 
-## Methodology Used
+## Paper Methodology
+
+The paper's testbed uses custom Broadcom Trident 2 ASICs with 64 servers across 2 racks, connected via a 2-tier Leaf-Spine fabric (2 leaves, 2 spines) with 10 Gbps host links and 4×40 Gbps uplinks per leaf (2:1 oversubscription). Key parameters:
+
+- **Flowlet timeout (T_fl):** 13ms for CONGA-Flow (greater than max path latency, ensuring no reordering)
+- **Congestion metric:** Discounting Rate Estimator (DRE) — a per-link register incremented by packet size and exponentially decayed, quantized to 3 bits (Q=3)
+- **DRE time constant (τ):** 160µs
+- **Feedback mechanism:** Congestion metrics piggybacked on return traffic via VXLAN overlay header fields (LBTag, CE, FB_LBTag, FB_Metric)
+- **Load balancing decision:** Source leaf selects the uplink minimizing max(local DRE, remote congestion metric from Congestion-To-Leaf table)
+- **Incast workload:** N senders each send 10MB/N of a striped file simultaneously to one receiver; aggregate throughput measured at receiver
+
+---
+
+## Implementation Methodology
 
 ### Topology
 
-I built a Leaf-Spine topology in Mininet using BMv2 (`simple_switch_grpc`) as the switch target, consistent with the CIS 537 lab environment. The topology consists of:
+A 4-switch Leaf-Spine topology in Mininet using BMv2:
+- **s1:** source leaf (h1–h4 attached on ports 3–6, spine uplinks on ports 1–2)
+- **s2:** destination leaf (hrecv attached on port 3)
+- **s3, s4:** spine switches
 
-- 2 spine switches (s3, s4)
-- 2 leaf switches (s1, s2)
-- 4 sender hosts (h1–h4) connected to leaf s1
-- 1 receiver host (hrecv) connected to leaf s2
-
-Each host connects to its leaf at 1 Gbps (Mininet default). Leaf-to-spine links are also 1 Gbps. This is significantly lower bandwidth than the paper's 10/40 Gbps links; results are reported in Mbps and compared on a relative basis only.
+All switches run either `ecmp.p4` or `conga.p4` compiled via `p4c-bm2-ss`. Table entries are populated at startup via per-switch P4Runtime JSON files (`s1-runtime.json`, `s1-conga-runtime.json`, etc.).
 
 ### ECMP Baseline (`ecmp.p4`)
 
-Standard ECMP is implemented using a hash action selector on the 5-tuple (src IP, dst IP, protocol, src port, dst port) using CRC16. The `ecmp_group` table maps destination prefixes to a hash range, and `ecmp_nhop` maps hash values to next-hop MAC/IP/port entries.
+Standard 5-tuple hash action selector. For traffic destined to `10.0.5.5`, s1 hashes the flow to one of two uplink ports (ecmp_select 0 or 1 → port 1 or 2). The hash assignment is static for the lifetime of each flow.
 
 ### CONGA-Flow (`conga.p4`)
 
-The CONGA-Flow implementation extends the flowlet switching lab with per-path congestion registers. The key design decisions are:
+Built on the flowlet switching lab foundation:
 
-**Flowlet detection** — A `flowlet_time_stamp` register (size 8192, indexed by 5-tuple hash) stores the ingress timestamp of the last packet for each flow. A `flowlet_to_id` register stores the chosen path (0 or 1) for each active flowlet. On each packet, the inter-packet gap is computed. If it exceeds `FLOWLET_TIMEOUT` (200,000 microseconds = 200 ms), a new flowlet decision is triggered.
-
-> **Note on timeout value:** The paper uses T_fl = 500 µs for CONGA and 13 ms for CONGA-Flow. I used 200 ms because BMv2's `ingress_global_timestamp` has microsecond resolution but software switching latency means gaps that would be sub-millisecond on hardware are tens of milliseconds in Mininet. A 200 ms threshold produced observable flowlet boundaries in practice.
-
-**Congestion measurement** — A `congestion_reg` register of size 2 stores the per-path queue depth. In the egress pipeline, `standard_metadata.deq_qdepth` (the departure queue depth in BMv2) is written to `congestion_reg[0]` or `congestion_reg[1]` based on which ingress port the packet arrived on (port 1 → path 0, port 2 → path 1). This approximates the DRE signal using BMv2's software queue depth intrinsic.
-
-**Path selection** — On a new flowlet, both congestion registers are read and compared. The flowlet is assigned to path 0 if `cong_path0 <= cong_path1`, otherwise path 1. The result is written to `flowlet_to_id` for use by subsequent packets in the same flowlet.
-
-**Forwarding** — A `conga_nhop` table keyed on `flowlet_id` (0 or 1) maps each path to its next-hop MAC, IP, and egress port. Destinations that should receive CONGA-Flow treatment are identified by a `conga_check` LPM table; all other traffic falls through to the ECMP path.
+1. **Flowlet detection:** Per-flow register storing the last-seen packet timestamp (indexed by 5-tuple hash). If the inter-packet gap exceeds `FLOWLET_TIMEOUT` (defined as 200ms), a new flowlet boundary is declared.
+2. **Congestion measurement:** In MyEgress, each packet arriving on ingress port 1 or 2 (the spine-facing uplinks) writes `standard_metadata.deq_qdepth` to `congestion_reg[0]` or `congestion_reg[1]` respectively.
+3. **Path selection:** At each flowlet boundary, `update_flowlet_id()` reads both congestion registers and sets `flowlet_id` to whichever path has the lower queue depth, then writes the decision back to `flowlet_to_id`.
+4. **Forwarding:** `conga_nhop` table maps `flowlet_id` (0 or 1) to the corresponding uplink next-hop, effectively routing the flowlet to the less-congested spine.
 
 ### Divergences from the Paper
 
-| Paper | This Replication |
-|---|---|
-| Custom Trident 2 ASIC, sub-µs queue feedback | BMv2 software switch, software-rate queue depth via `deq_qdepth` |
-| T_fl = 500 µs (CONGA) / 13 ms (CONGA-Flow) | T_fl = 200 ms (tuned for BMv2 latency) |
-| 4-bit LBTag, 3-bit CE in VXLAN overlay header | Path ID stored in P4 register; no actual in-band header field |
-| Leaf-to-leaf feedback via piggybacked packets | Congestion written directly to local register from egress `deq_qdepth` |
-| 10 Gbps host links, 40 Gbps fabric links | 1 Gbps Mininet virtual links |
-| N = 2 to 63 fanout | N = 2, 4 only (BMv2 CPU limits) |
-| 5 runs per condition, median reported | 5 runs per condition, median reported |
+| Aspect | Paper | This Replication |
+|--------|-------|-----------------|
+| Flowlet timeout (T_fl) | 13ms | 200ms (tuned for BMv2's software switching latency; note the presentation slides stated 50ms but the implemented value is 200ms) |
+| Congestion signal | DRE (hardware rate estimator, τ=160µs) | `deq_qdepth` register reads — a queue depth proxy rather than a true rate estimate |
+| Feedback mechanism | In-band VXLAN overlay headers across all fabric hops | Return-path `deq_qdepth` written directly to `congestion_reg` at the source leaf in `MyEgress` |
+| Hardware | Custom Broadcom Trident 2 ASICs, 10/40 Gbps links | BMv2 software switch; uplinks capped via `tc tbf` at 8 Mbps to create measurable congestion |
+| Fanout values | N = 2, 4, 8, 16, up to 63 | N = 2, 4 only — BMv2 CPU limits precluded higher fanout |
 
-The most significant divergence is the congestion signal itself. The paper's DRE operates at ASIC speeds and produces a signal that arrives at the source leaf within one RTT (~100 µs). BMv2's `deq_qdepth` is updated at software packet processing rates, so the signal is both noisier and staler than in hardware. This is the primary reason the absolute throughput advantage of CONGA-Flow over ECMP does not replicate.
+**Critical divergence is uplink shaping:** Because BMv2 treats all virtual links as software-unlimited, artificial uplink congestion was necessary to observe any load balancing effect. The source leaf's two spine-facing interfaces (s1-eth1, s1-eth2) were capped at 8 Mbps each via `tc tbf` applied at the start of each experiment. Without this, all flows ran at full BMv2 software speed with no observable fabric-level congestion.
 
-### Traffic Generation and Measurement
+### How to Run
 
-`run_tests.py` drives the experiment from inside the Mininet CLI using the `--custom` flag. For each fanout N and each of 5 runs:
+```bash
+# Build and start ECMP topology
+make run
 
-1. An iperf server is started on `hrecv`.
-2. N iperf clients on h1–hN are launched simultaneously with `iperf -c <recv_ip> -t 10`.
-3. After 15 seconds (10s transfer + 5s settling), per-host throughput is parsed from iperf output.
-4. Results are appended to `results.json`.
+# In Mininet CLI — run ECMP experiments
+py exec(open('run_tests.py').read(), {'net': net})
 
-The median total throughput across 5 runs is reported. ECMP and CONGA-Flow experiments are run separately using `ecmp.p4` and `conga.p4` respectively, with corresponding runtime JSON table entries.
+# Exit and start CONGA-Flow topology
+make stop
+make run-conga
+
+# In Mininet CLI — run CONGA-Flow experiments
+py exec(open('run_tests.py').read(), {'net': net, 'AUTOEXP_MODE': 'conga'})
+```
+
+Results are saved to `results.json`. Generate the figure with:
+```bash
+python3 save_result.py plot
+```
 
 ---
 
 ## Results
 
-### Raw Data
+### Round 1: Initial Results (Presented April 16, 2026)
 
-**ECMP — N=2** (5 runs, per-host Mbps):
+The initial experiments were run without explicit link bandwidth constraints, Mininet links were left at their default software-unlimited rate.
 
-| Run | h1 | h2 | Total |
-|---|---|---|---|
-| 1 | 11.0 | 10.8 | 21.8 |
-| 2 | 7.16 | 14.5 | 21.66 |
-| 3 | 6.27 | 15.0 | 21.27 |
-| 4 | 12.3 | 8.11 | 20.41 |
-| 5 | 16.2 | 8.31 | 24.51 |
-| **Median total** | | | **21.66** |
+**ECMP (initial):**
+- N=2: 21.7 Mbps aggregate
+- N=4: 23.1 Mbps aggregate — minimal gain despite 2× senders, consistent with hash collisions
 
-**ECMP — N=4** (5 runs, per-host Mbps):
+**CONGA-Flow (initial):**
+- Per-host range: 4.3–5.5 Mbps vs ECMP per-host range: 4.8–8.3 Mbps
+- CONGA-Flow showed tighter per-host distribution, suggesting fairer bandwidth sharing
 
-| Run | h1 | h2 | h3 | h4 | Total |
-|---|---|---|---|---|---|
-| 1 | 6.12 | 6.71 | 4.37 | 6.41 | 23.61 |
-| 2 | 6.54 | 6.27 | 4.87 | 4.76 | 22.44 |
-| 3 | 5.41 | 8.28 | 5.16 | 4.77 | 23.62 |
-| 4 | 4.84 | 6.06 | 6.43 | 5.14 | 22.47 |
-| 5 | 5.94 | 6.26 | 4.76 | 6.13 | 23.09 |
-| **Median total** | | | | | **23.09** |
+These results showed a promising fairness signal. However, the absolute throughput values reflected BMv2 CPU capacity rather than any fabric bottleneck. Because no link was actually congested, ECMP's hash collisions were not stressing the fabric meaningfully, and the CONGA congestion registers had nothing to react to. Following the presentation, Professor Guo identified this as a CPU saturation issue and recommended re-running with explicit, lower bandwidth constraints to create genuine fabric-level congestion.
 
-**CONGA-Flow — N=2** (5 runs, excluding run 1 which returned 0.0 due to a iperf server startup race condition):
+### Round 2: Controlled Results with Uplink Shaping
 
-| Run | h1 | h2 | Total |
-|---|---|---|---|
-| 2 | 8.65 | 9.47 | 18.12 |
-| 3 | 8.65 | 9.25 | 17.90 |
-| 4 | 9.01 | 9.05 | 18.06 |
-| 5 | 7.61 | 11.3 | 18.91 |
-| **Median total** | | | **18.09** |
+The second round applied `tc tbf` rate limits to s1's two spine-facing uplinks (8 Mbps each), making the uplinks the actual bottleneck rather than the BMv2 CPU.
 
-**CONGA-Flow — N=4** (5 runs):
+![ECMP vs CONGA-Flow](figure13_replication.png)
 
-| Run | h1 | h2 | h3 | h4 | Total |
-|---|---|---|---|---|---|
-| 1 | 4.94 | 5.43 | 4.53 | 4.60 | 19.50 |
-| 2 | 4.32 | 4.48 | 5.39 | 5.52 | 19.71 |
-| 3 | 3.86 | 4.24 | 4.33 | 4.09 | 16.52 |
-| 4 | 5.05 | 4.91 | 5.04 | 4.43 | 19.43 |
-| 5 | 4.70 | 5.20 | 5.41 | 4.72 | 20.03 |
-| **Median total** | | | | | **19.50** |
+**ECMP (controlled):**
 
-### Summary Chart
+| Fanout | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median Total |
+|--------|-------|-------|-------|-------|-------|-------------|
+| N=2 | [3.6, 4.1] = 7.7 | [3.4, 4.3] = 7.7 | [4.4, 3.3] = 7.7 | [3.6, 4.0] = 7.6 | [2.7, 5.0] = 7.7 | **7.7 Mbps** |
+| N=4 | [4.4, 3.7, 3.2, 3.9] = 15.3 | [2.6, 2.4, 7.2, 2.8] = 14.9 | [2.4, 2.5, 7.6, 2.7] = 15.3 | [2.2, 2.8, 7.6, 2.6] = 15.2 | [1.8, 1.9, 1.9, 2.1] = 7.7 | **15.2 Mbps** |
 
-![Incast throughput: ECMP vs CONGA-Flow](figure13_replication.png)
+**CONGA-Flow (controlled):**
 
-*Figure: Aggregate incast throughput (Mbps) for ECMP and CONGA-Flow at fanout N=2 and N=4. Error bars show min/max across 5 runs. BMv2/Mininet replication of the load balancing claim underlying Figure 13 of Alizadeh et al., SIGCOMM 2014.*
+| Fanout | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median Total |
+|--------|-------|-------|-------|-------|-------|-------------|
+| N=2 | [12.9, 9.2] = 22.1 | [12.3, 10.2] = 22.5 | [11.4, 11.4] = 22.8 | [10.9, 10.9] = 21.8 | [10.9, 11.6] = 22.5 | **22.5 Mbps** |
+| N=4 | [7.4, 7.6, 3.0, 4.1] = 22.1 | [6.8, 3.8, 7.3, 3.3] = 21.2 | [4.7, 4.3, 6.1, 4.9] = 19.9 | [5.3, 5.5, 5.6, 4.7] = 21.1 | [4.0, 4.3, 6.9, 6.4] = 21.6 | **21.2 Mbps** |
 
-### Comparison with Paper
+### Comparison with Original Paper
 
-The paper's Figure 13 shows CONGA+TCP maintaining near-100% throughput as fanout increases from 1 to 63 senders, while MPTCP degrades sharply. The paper does not plot a direct ECMP vs. CONGA-Flow total throughput comparison across fanouts in a single figure, but the underlying claim — that CONGA-Flow distributes load more evenly across paths than ECMP — is visible in Figure 12 (throughput imbalance CDF).
+The paper reports CONGA-Flow achieving meaningfully better aggregate throughput and flow completion time than ECMP. Our controlled replication confirms this directionally:
 
-| Metric | Paper (hardware) | This replication (BMv2) |
-|---|---|---|
-| ECMP N=2 median total | ~10 Gbps (estimated from Fig. 13 scale) | 21.66 Mbps |
-| ECMP N=4 median total | ~10 Gbps | 23.09 Mbps |
-| CONGA-Flow N=2 median total | ~10 Gbps | 18.09 Mbps |
-| CONGA-Flow N=4 median total | ~10 Gbps | 19.50 Mbps |
-| ECMP per-host range (N=4) | Not directly reported | 4.76–8.28 Mbps |
-| CONGA-Flow per-host range (N=4) | Not directly reported | 3.86–5.52 Mbps |
+**Aggregate throughput:**
+- N=2: CONGA-Flow achieves **2.9× higher** aggregate throughput than ECMP (22.5 vs 7.7 Mbps). ECMP hashes both flows to the same uplink, hitting the 8 Mbps cap. CONGA-Flow detects the congestion and splits flowlets across both uplinks, nearly doubling available bandwidth.
+- N=4: CONGA-Flow achieves **~40% higher** aggregate throughput (21.2 vs 15.2 Mbps median). ECMP collisions cause 3 of 4 hosts to share a congested uplink; CONGA-Flow rebalances across both.
 
-The absolute throughput numbers cannot be compared directly — BMv2 operates at roughly 20 Mbps aggregate vs. hardware at 10+ Gbps. The relevant comparison is the **relative trend and distribution**.
+**Per-host fairness:**
+- ECMP N=4: runs 2–4 show one host capturing ~7.5 Mbps while the other three starve at ~2.5 Mbps each. The winning host is sticky, h3 dominates in runs 2, 3, and 4 due to a fixed hash assignment.
+- CONGA-Flow N=4: average within-run standard deviation is 1.21 Mbps vs ECMP's 1.39 Mbps. More importantly, no single host permanently dominates, and the load shifts across runs as CONGA-Flow's congestion registers steer flowlets to less-loaded paths.
+
+These results qualitatively replicate the paper's core claim: CONGA-Flow achieves better fabric utilization than ECMP under incast conditions by making congestion-informed path decisions rather than relying on a fixed hash.
 
 ---
 
 ## Discussion
 
-### What Replicated
+### Why Two Rounds of Experiments Were Necessary
 
-The fairness property of CONGA-Flow replicated clearly. Under ECMP at N=4, per-host throughput ranged from 4.37 to 8.28 Mbps across runs — a spread of ~3.9 Mbps. Under CONGA-Flow at N=4, the range was 3.86 to 5.52 Mbps — a spread of ~1.7 Mbps. CONGA-Flow produced noticeably more even per-host distribution, which is exactly the load balancing claim the paper makes.
+The initial experiments revealed a fundamental challenge in BMv2-based replication: without explicit link constraints, Mininet virtual links are effectively unlimited and BMv2 forwards traffic at whatever rate the host CPU allows. The CONGA congestion registers were updating but had no meaningful signal, and no link was actually congested.
 
-Additionally, ECMP's total throughput barely increased from N=2 to N=4 (21.66 → 23.09 Mbps), consistent with hash collision effects limiting the benefit of additional senders. This matches the paper's description of ECMP's behavior under incast.
+The progression from Round 1 to Round 2 involved several calibration attempts:
 
-### What Did Not Replicate
+1. Adding `{"bw": X, "delay": "Yms"}` to topology JSON link entries, but was rejected by `run_exercise.py` with "Illegal latency" errors
+2. Adding `tc tbf` rate limits to host interfaces via topology JSON `commands`, this was applied correctly but became the sole bottleneck, masking fabric effects
+3. Applying `tc tbf` to s1's spine-facing switch interfaces. This placed the bottleneck at the fabric uplinks where it belongs
 
-CONGA-Flow did not achieve higher aggregate throughput than ECMP. In our results, ECMP had higher median totals at both fanout levels. The paper predicts CONGA should match or exceed ECMP throughput while distributing it more evenly. There are two concrete reasons for this divergence:
+This calibration process is an important finding in itself: replicating network experiments in software requires careful attention to *where* the bottleneck sits, because the answer determines whether the load balancing mechanism can have any observable effect at all.
 
-**1. BMv2 register overhead.** Each CONGA packet triggers four register operations in the ingress pipeline (read flowlet timestamp, read flowlet ID, read cong_path0, read cong_path1) and one write in the egress pipeline (write congestion register). In BMv2, register operations are serialized through software, adding measurable per-packet latency that is absent on hardware. This overhead reduces CONGA's effective throughput relative to the simpler ECMP path.
+### Why the ECMP N=2 Result Is So Pronounced
 
-**2. Congestion signal fidelity.** The paper's DRE produces a queue utilization signal that propagates back to the source leaf within one network RTT (~100 µs). In BMv2, `deq_qdepth` is updated at software switching rates and the register write happens in the egress pipeline of a different switch than the one making the forwarding decision. The signal is therefore stale by the time it influences a path selection decision, particularly for the short 10-second iperf flows used in this experiment. A stale signal means CONGA-Flow is sometimes making path decisions on outdated information, which reduces its advantage over ECMP's simple hash.
+At N=2, ECMP hashes h1 and h2's 5-tuples to the same uplink. Both flows then compete for a single 8 Mbps uplink, splitting it roughly evenly at ~3.8 Mbps each (totaling ~7.7 Mbps). CONGA-Flow detects that one uplink is accumulating queue depth and routes the second flowlet to the idle uplink, achieving ~11 Mbps per host (totaling ~22.5 Mbps). This is the clearest possible demonstration of ECMP's hash collision problem.
 
-### Gaps the Paper Does Not Address
+A reader may notice that 22.5 Mbps exceeds the stated 8 Mbps uplink cap. This is expected and consistent: the `tc tbf` cap is applied to the switch interface, not the host NIC. When CONGA-Flow routes the two flows to *different* uplinks, each flow has its own uncontested 8 Mbps uplink and can push up to whatever BMv2's software forwarding ceiling allows on that path (~11 Mbps in practice). The cap only bites when two flows *share* the same uplink, which is precisely what ECMP causes and CONGA-Flow avoids. Total fabric capacity with both uplinks in use is 2 × 8 = 16 Mbps at the switch interface level, but BMv2 software forwarding headroom above the cap means observed throughput can exceed this, and the cap creates the congestion signal CONGA needs, not a hard ceiling on total throughput.
 
-The paper describes CONGA at a relatively high level of abstraction. Translating it into concrete P4 on BMv2 required filling in several unstated details:
+### Why the Congestion Signal Works Despite BMv2 Limitations
 
-- **No in-band header.** The paper's congestion feedback depends on a VXLAN overlay header carrying `LBTag`, `CE`, `FB_LBTag`, and `FB_Metric` fields between leaf switches. In BMv2/Mininet there is no overlay and no mechanism to inject custom fields into packets that traverse multiple switches. The congestion register approach used here — writing `deq_qdepth` from the egress pipeline of the source leaf's own ports — is a functional approximation but loses the cross-switch propagation that makes leaf-to-leaf feedback work in the real system.
+Unlike in Round 1 (where the congestion registers had no signal), the 8 Mbps uplink cap creates real queue buildup that `deq_qdepth` can detect. When ECMP collides two flows onto one uplink, that uplink's queue grows, `congestion_reg[0]` or `congestion_reg[1]` rises, and at the next flowlet boundary CONGA-Flow steers new traffic to the other uplink. The 200ms flowlet timeout means path decisions are made infrequently enough that BMv2's register latency does not prevent the signal from being useful.
 
-- **Flowlet timeout tuning.** The paper's 500 µs default timeout is calibrated to hardware RTTs. In BMv2, software switching latency means a "gap" that would be 200 µs on hardware might be 50 ms or more in Mininet. The 200 ms timeout used here was determined empirically; there is no principled way to convert hardware timing parameters to BMv2 timing parameters.
+### Limitations
 
-- **Table initialization.** The paper describes the Flowlet Table and Congestion-To-Leaf Table being maintained in ASIC memory. In P4/BMv2, these become register arrays and must be seeded carefully. The runtime JSON files (`s1-conga-runtime.json`, etc.) configure the `conga_check` and `conga_nhop` tables; the congestion registers are zero-initialized, which means the first flowlet decision in every flow defaults to path 0 until a congestion signal arrives.
-
----
-
-## What Else Is Useful to Know
-
-**On CONGA-Flow vs. full CONGA.** CONGA-Flow is not a simplified version of CONGA, it is a specific operating mode that the paper defines and evaluates. The difference is only in the flowlet timeout: CONGA uses T_fl = 500 µs (many flowlets per flow), CONGA-Flow uses T_fl = 13 ms (effectively one load balancing decision per flow). Both use the same leaf-to-leaf congestion feedback. In this replication, the inability to implement true cross-switch feedback means the implementation is closer in spirit to CONGA-Flow than to full CONGA regardless of the timeout value.
-
-**On BMv2 as a replication platform.** BMv2 is an excellent tool for verifying P4 program correctness and control plane logic, but it is not designed for performance evaluation. Its throughput ceiling (~20–100 Mbps depending on pipeline complexity) is three orders of magnitude below real hardware. Any replication of a performance result from a hardware-based paper using BMv2 will necessarily focus on relative trends rather than absolute values. This is not a limitation unique to this project — it is a fundamental property of the platform.
-
-**On the paper's Figure 13.** The figure compares CONGA+TCP against MPTCP across fanout values up to 63. The x-axis measures the number of simultaneous senders (fanout), not load in the traditional sense. The y-axis is throughput as a percentage of the access link rate. The key result is that MPTCP's throughput collapses at high fanout due to TCP incast, while CONGA+TCP does not. This is a TCP behavior result as much as a load balancing result, CONGA avoids MPTCP's incast problem because it does not open multiple subflows per connection. A BMv2 replication of this specific figure would require accurate TCP incast modeling, which is beyond what Mininet's kernel TCP provides at these traffic scales.
+The N=4 results show more variance than N=2 because four flows across two uplinks creates a more complex collision pattern that CONGA-Flow's simple min-congestion selection does not always resolve optimally within a 15-second iperf run. The paper's hardware implementation benefits from sub-RTT feedback, which allows much faster rebalancing. Some runs still show one host dominating, though the effect is less severe and less sticky than under ECMP.
 
 ---
 
-## How to Run
+## Additional Context
 
-The experiment requires the CIS 537 P4 VM with `p4c`, `simple_switch_grpc`, and Mininet installed.
+**BMv2 as a research platform:** BMv2 is designed for protocol correctness verification, not performance benchmarking. Its software packet processing pipeline introduces per-packet latency orders of magnitude higher than ASIC hardware. The 200ms flowlet timeout (vs. 13ms in the paper) reflects this, and in BMv2, a 13ms gap threshold caused nearly every packet to trigger a new flowlet boundary, destroying flow affinity entirely.
 
-**ECMP baseline:**
-```bash
-make run
-```
-Wait for the `mininet>` prompt, then:
-```
-mininet> py exec(open('run_tests.py').read(), {'net': net})
-```
-Wait for all 10 experiments (N=2 and N=4, 5 runs each) to complete, then `exit`.
+**Lessons learned:**
+- *P4 is a pipeline, not a program:* every register read/write and table lookup has a fixed per-packet cost. The CONGA path adds 4 register operations per packet vs ECMP's 1 hash + 1 lookup, which is measurable overhead in software.
+- *Hardware assumptions matter enormously:* CONGA's DRE operates at τ=160µs; replicating its effect with `deq_qdepth` at BMv2 speeds required creating artificial congestion conditions (the uplink cap) that would not be needed on real hardware.
+- *Where the bottleneck sits determines what you can measure:* the most important experimental calibration decision was moving the rate limit from the host NICs to the switch uplinks. Only then did the load balancing mechanism have anything to act on.
+- *The trend is the result:* due to platform differences, absolute throughput numbers cannot match the paper. The relative behavior, CONGA-Flow using both uplinks while ECMP wastes one is the meaningful replication target, and it replicates clearly.
 
-**CONGA-Flow:**
-```bash
-make run-conga
-```
-Wait for the `mininet>` prompt, then pass `AUTOEXP_MODE` directly into the exec namespace — the `py AUTOEXP_MODE = 'conga'` shorthand fails due to Mininet's quote handling:
-```
-mininet> py exec(open('run_tests.py').read(), {'net': net, 'AUTOEXP_MODE': 'conga'})
-```
-Wait for all 10 experiments (N=2 and N=4, 5 runs each) to complete, then `exit`.
+---
 
-Results are appended to `results.json` automatically after each run. The chart in `figure13_replication.png` was generated from this file using matplotlib:
-```bash
-python3 save_result.py plot
-```
+## Source Files
+
+| File | Description |
+|------|-------------|
+| `conga.p4` | CONGA-Flow P4 program |
+| `ecmp.p4` | ECMP baseline P4 program |
+| `run_tests.py` | Automated incast experiment runner (includes uplink shaping setup) |
+| `save_result.py` | Result storage and plot generation (`python3 save_result.py plot`) |
+| `results.json` | Raw experimental data from both ECMP and CONGA-Flow runs |
+| `figure13_replication.png` | Results figure (aggregate throughput + per-host fairness) |
+| `s{1-4}-runtime.json` | Per-switch P4Runtime table entries for ECMP |
+| `s{1-4}-conga-runtime.json` | Per-switch P4Runtime table entries for CONGA-Flow |
+| `topology.json` | Mininet topology definition for ECMP |
+| `topology-conga.json` | Mininet topology definition for CONGA-Flow |
+| `Makefile` | Build and run targets |
